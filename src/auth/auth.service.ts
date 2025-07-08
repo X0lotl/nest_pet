@@ -2,24 +2,32 @@ import {
   Injectable,
   UnauthorizedException,
   ConflictException,
+  Inject,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { eq } from 'drizzle-orm';
 import * as bcrypt from 'bcryptjs';
-import { User } from './interfaces/user.interface';
+import { Database, DATABASE_TOKEN, users, User } from '../db';
 import { RegisterDto, LoginDto, AuthResponseDto } from './dto/auth.dto';
 
 @Injectable()
 export class AuthService {
-  private users: User[] = []; // In-memory storage for demo purposes
-
-  constructor(private jwtService: JwtService) {}
+  constructor(
+    private jwtService: JwtService,
+    @Inject(DATABASE_TOKEN) private db: Database,
+  ) {}
 
   async register(registerDto: RegisterDto): Promise<AuthResponseDto> {
     const { email, password, name } = registerDto;
 
     // Check if user already exists
-    const existingUser = this.users.find((user) => user.email === email);
-    if (existingUser) {
+    const existingUser = await this.db
+      .select()
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+
+    if (existingUser.length > 0) {
       throw new ConflictException('User with this email already exists');
     }
 
@@ -27,24 +35,23 @@ export class AuthService {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Create user
-    const user: User = {
-      id: Date.now().toString(),
-      email,
-      name,
-      password: hashedPassword,
-      createdAt: new Date(),
-    };
-
-    this.users.push(user);
+    const [newUser] = await this.db
+      .insert(users)
+      .values({
+        email,
+        name,
+        passwordHash: hashedPassword,
+      })
+      .returning();
 
     // Generate JWT
-    const payload = { sub: user.id, email: user.email };
+    const payload = { sub: newUser.id, email: newUser.email };
     const access_token = this.jwtService.sign(payload);
 
     return {
       access_token,
-      email: user.email,
-      name: user.name,
+      email: newUser.email,
+      name: newUser.name,
     };
   }
 
@@ -52,13 +59,18 @@ export class AuthService {
     const { email, password } = loginDto;
 
     // Find user
-    const user = this.users.find((u) => u.email === email);
+    const [user] = await this.db
+      .select()
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+
     if (!user) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
     // Verify password
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
     if (!isPasswordValid) {
       throw new UnauthorizedException('Invalid credentials');
     }
@@ -74,12 +86,22 @@ export class AuthService {
     };
   }
 
-  async validateUser(payload: any): Promise<User | null> {
-    const user = this.users.find((u) => u.id === payload.sub);
-    if (user) {
-      const { password, ...result } = user;
-      return result as User;
-    }
-    return null;
+  async getUserOrNull(
+    payload: any,
+  ): Promise<Omit<User, 'passwordHash'> | null> {
+    const [user] = await this.db
+      .select({
+        id: users.id,
+        email: users.email,
+        name: users.name,
+        isActive: users.isActive,
+        createdAt: users.createdAt,
+        updatedAt: users.updatedAt,
+      })
+      .from(users)
+      .where(eq(users.id, payload.sub))
+      .limit(1);
+
+    return user || null;
   }
 }
